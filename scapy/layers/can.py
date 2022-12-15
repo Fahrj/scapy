@@ -14,7 +14,7 @@ import gzip
 import struct
 
 from scapy.compat import Tuple, Optional, Type, List, Union, Callable, IO, \
-    Any, cast, hex_bytes
+    Any, cast, hex_bytes, Dict
 
 import scapy.libs.six as six
 from scapy.config import conf
@@ -29,6 +29,11 @@ from scapy.error import Scapy_Exception
 from scapy.plist import PacketList
 from scapy.supersocket import SuperSocket
 from scapy.utils import _ByteStream
+
+try:
+    from enum import Enum
+except ImportError:
+    Enum = None  # type: ignore
 
 __all__ = ["CAN", "SignalPacket", "SignalField", "LESignedSignalField",
            "LEUnsignedSignalField", "LEFloatSignalField", "BEFloatSignalField",
@@ -191,6 +196,8 @@ class SignalField(ScalingField):
     files. All necessary functions to easily create Scapy dissectors similar
     to signal descriptions from DBC files are provided by this base class.
 
+    Enum is evaluated on the raw values, not on the scaled + offset values.
+
     SignalField instances should only be used together with SignalPacket
     classes since SignalPackets enforce length checks for CAN messages.
 
@@ -198,12 +205,28 @@ class SignalField(ScalingField):
     __slots__ = ["start", "size"]
 
     def __init__(self, name, default, start, size, scaling=1, unit="",
-                 offset=0, ndigits=3, fmt="B"):
-        # type: (str, Union[int, float], int, int, Union[int, float], str, Union[int, float], int, str) -> None  # noqa: E501
+                 offset=0, ndigits=3, enum={}, fmt="B"):
+        # type: (str, Union[int, float], int, int, Union[int, float], str, Union[int, float], int, Optional[Dict[Union[int, float], str]], str) -> None  # noqa: E501
         ScalingField.__init__(self, name, default, scaling, unit, offset,
                               ndigits, fmt)
         self.start = start
         self.size = abs(size)
+
+        m2s = self.m2s = {}
+        s2m = self.s2m = {}
+        if Enum and isinstance(enum, type) and issubclass(enum, Enum):
+            # Python's Enum
+            names = [x.name for x in enum]
+            for n in names:
+                value = enum[n].value
+                m2s[value] = n
+                s2m[n] = value
+        else:
+            keys = list(enum)  # type: ignore
+            for k in keys:
+                value = cast(str, enum[k])  # type: ignore
+                m2s[k] = value
+                s2m[value] = k
 
         if fmt[-1] == "f" and self.size != 32:
             raise Scapy_Exception("SignalField size has to be 32 for floats")
@@ -357,6 +380,38 @@ class SignalField(ScalingField):
         # type: (Packet, Any) -> int
         return int(float(self.size) / 8)
 
+    def any2i(self, pkt, x):
+        # type: (Optional[Packet], Any) -> Union[int, float]
+        if isinstance(x, str) and x in self.s2m:
+            return self.m2i(pkt, self.s2m[x])
+        return super().any2i(pkt, x)
+
+    def i2repr(self, pkt, i):
+        # type: (Optional[Packet], Union[int, float]) -> str
+        m = self.i2m(pkt, i)
+        if m in self.m2s:
+            return self.m2s[m]
+        else:
+            return ScalingField.i2repr(self, pkt, i)
+
+    # def notify_set(self, enum, key, value):
+    #     # type: (ObservableDict, I, str) -> None
+    #     ks = "0x%x" if isinstance(key, int) else "%s"
+    #     log_runtime.debug(
+    #         "At %s: Change to %s at " + ks, self, value, key
+    #     )
+    #     if self.i2s is not None and self.s2i is not None:
+    #         self.i2s[key] = value
+    #         self.s2i[value] = key
+
+    # def notify_del(self, enum, key):
+    #     # type: (ObservableDict, I) -> None
+    #     ks = "0x%x" if isinstance(key, int) else "%s"
+    #     log_runtime.debug("At %s: Delete value at " + ks, self, key)
+    #     if self.i2s is not None and self.s2i is not None:
+    #         value = self.i2s[key]
+    #         del self.i2s[key]
+    #         del self.s2i[value]
 
 class LEUnsignedSignalField(SignalField):
     def __init__(self, name, default, start, size, scaling=1, unit="",
